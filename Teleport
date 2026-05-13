@@ -1,399 +1,1469 @@
--- ==================== TP + AUTO GRAB (Simplified) ====================
--- Only teleport to highest brainrot and auto-steal. No UI, no extra features.
-
--- Services
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-local TeleportService = game:GetService("TeleportService")
-local LocalPlayer = Players.LocalPlayer
+local __XI_WATERMARK = "XI_WM_daf3ce73bf93696fbb5e"
+    -- ================= KICK =================
+    local Players = game:GetService("Players")
+    local player = Players.LocalPlayer
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 pcall(function() game:GetService("Players").RespawnTime = 0 end)
+local privateBuild = false
 
--- ==================== Modules ====================
-local Packages = ReplicatedStorage:WaitForChild("Packages")
-local Datas = ReplicatedStorage:WaitForChild("Datas")
-local Shared = ReplicatedStorage:WaitForChild("Shared")
-local Utils = ReplicatedStorage:WaitForChild("Utils")
 
-local Synchronizer = require(Packages:WaitForChild("Synchronizer"))
-local AnimalsData = require(Datas:WaitForChild("Animals"))
-local AnimalsShared = require(Shared:WaitForChild("Animals"))
-local NumberUtils = require(Utils:WaitForChild("NumberUtils"))
+-- ============================================================
+-- ESTADO GENERAL DEL SCRIPT
+-- ============================================================
+local SharedState = {
+    SelectedPetData = nil,
+    AllAnimalsCache = nil,
+    DisableStealSpeed = nil,
+    ListNeedsRedraw = true,
+    AdminButtonCache = {},
+    StealSpeedToggleFunc = nil,
+    _ssUpdateBtn = nil,
+    AdminProxBtn = nil,
+    BalloonedPlayers = {},
+    MobileScaleObjects = {},
+    RefreshMobileScale = nil,
+    MobileActionButtons = {},
+    RefreshMobileActionButtons = nil,
+}
 
--- ==================== Constants ====================
-local TP_TOOL = "Flying Carpet"            -- Change if needed
-local STEAL_RADIUS = 12                   -- Max distance to trigger prompt
-local TP_RANGE = 70                       -- Teleport if target farther than this
-local STEAL_BURST = 3                     -- Number of fires per attempt
-local STEAL_DELAY = 0.12                  -- Debounce between steals
+do
+-- SOURCE: :contentReference[oaicite:0]{index=0}
+-- ITSB HUB v5 - TRUE INSTANT STEAL (BRAINROT DETECTOR + BOX FILTER)
+-- MOD: SOLO ROBA PROMPTS QUE ESTÉN EN EL MISMO CUADRO (BOX) QUE EL JUGADOR
+-- VERSION SIN UI
 
--- ==================== Helper Functions ====================
+local CONFIG = {
+    AUTO_STEAL = false,
+    RADIUS = 12
+}
+
+local boxes = {
+    {min = Vector3.new(-337.448303, -3.898971, -122.397758), max = Vector3.new(-328.004578, -3.898971, 242.625626)},
+    {min = Vector3.new(-327.257660, -3.899109, -122.228622), max = Vector3.new(-320.600891, -3.899109, 242.612259)},
+    {min = Vector3.new(-319.783386, -3.898970, -122.227089), max = Vector3.new(-312.908325, -3.898970, 242.585617)},
+    {min = Vector3.new(-312.445648, -3.899108, -122.389832), max = Vector3.new(-305.489899, -3.899108, 242.456818)},
+    {min = Vector3.new(-305.037048, -3.898970, -122.230743), max = Vector3.new(-293.957489, -3.898970, 242.606873)},
+    {min = Vector3.new(-491.448608, -3.898972, -122.253258), max = Vector3.new(-481.811737, -3.898972, 242.615005)},
+    {min = Vector3.new(-498.971069, -3.898970, -122.382767), max = Vector3.new(-491.748840, -3.898970, 242.612061)},
+    {min = Vector3.new(-506.436737, -3.898972, -122.411476), max = Vector3.new(-499.318542, -3.898972, 242.615982)},
+    {min = Vector3.new(-513.783569, -3.898972, -122.223297), max = Vector3.new(-506.801849, -3.898972, 242.627090)},
+    {min = Vector3.new(-525.236938, -3.898972, -122.409813), max = Vector3.new(-514.265015, -3.898972, 242.608932)},
+}
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+
+local trackedPrompts = {}
+local lastFire = {}
+
+local SAFE_POLL_RATE = 0.10
+local SAFE_POLL_OVERRIDE_UNTIL = 0
+
+function _G.getSafePollRate()
+    if os.clock() < SAFE_POLL_OVERRIDE_UNTIL then
+        return 0.27
+    end
+    return SAFE_POLL_RATE
+end
+
+function _G.triggerSafePollBoost()
+    SAFE_POLL_OVERRIDE_UNTIL = os.clock() + 3
+end
+
+local FIRE_DEBOUNCE = 0.12
+local FIRE_BURST = 3
+
+local ENABLE_BURST = 25
+local ENABLE_DEBOUNCE = 0.00
+local ENABLE_COOLDOWN = 0.08
+
+local lastEnableFire = {}
+
+------------------------------------------------
+-- CHARACTER
+------------------------------------------------
 local function getHRP()
     local char = LocalPlayer.Character
     return char and char:FindFirstChild("HumanoidRootPart")
 end
 
-local function getCharacter()
-    return LocalPlayer.Character, 
-           LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"),
-           LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+------------------------------------------------
+-- BOX DETECTION
+------------------------------------------------
+local function getBoxIndex(pos)
+    for i,b in ipairs(boxes) do
+        if pos.X >= math.min(b.min.X,b.max.X) and pos.X <= math.max(b.min.X,b.max.X)
+        and pos.Z >= math.min(b.min.Z,b.max.Z) and pos.Z <= math.max(b.min.Z,b.max.Z) then
+            return i
+        end
+    end
 end
 
-local function riseToY(hrp, targetY)
-    if not hrp then return end
-    local start = os.clock()
-    while hrp.Parent and hrp.Position.Y < targetY do
-        local speed = math.clamp((targetY - hrp.Position.Y) * 20, 280, 310)
-        hrp.AssemblyLinearVelocity = Vector3.new(hrp.AssemblyLinearVelocity.X, speed, hrp.AssemblyLinearVelocity.Z)
-        if os.clock() - start > 3 then break end
-        RunService.Heartbeat:Wait()
+------------------------------------------------
+-- SAFE POSITION GET
+------------------------------------------------
+local function getPromptPosition(prompt)
+    local p = prompt.Parent
+    if not p then return end
+
+    if p:IsA("Attachment") and p.Parent then
+        p = p.Parent
     end
-    hrp.AssemblyLinearVelocity = Vector3.new(hrp.AssemblyLinearVelocity.X, 0, hrp.AssemblyLinearVelocity.Z)
+
+    if p:IsA("BasePart") then
+        return p.Position
+    elseif p:IsA("Model") then
+        return p:GetPivot().Position
+    end
+end
+
+------------------------------------------------
+-- AVAILABLE CHECK
+------------------------------------------------
+local function promptMatchesSelectedPet(prompt)
+    if not SharedState then return false end
+
+    local selected = SharedState.SelectedPetData
+    if not selected then return false end
+
+    local model = prompt:FindFirstAncestorOfClass("Model")
+    if not model then return false end
+
+    if selected.slot then
+        local slotAncestor = prompt:FindFirstAncestor(selected.slot)
+        if slotAncestor then
+            return true
+        end
+
+        if model.Name == selected.slot then
+            return true
+        end
+
+        if model.Parent and model.Parent.Name == selected.slot then
+            return true
+        end
+    end
+
+    if selected.name then
+        local wantedName = string.lower(selected.name)
+        local current = model
+
+        while current do
+            if current.Name and string.lower(current.Name) == wantedName then
+                return true
+            end
+            current = current.Parent
+        end
+    end
+
+    return false
+end
+
+local function isPromptAvailable(prompt, hrpPos)
+    if not prompt or not prompt.Parent then return false end
+    if not prompt.Enabled then return false end
+
+    local pos = getPromptPosition(prompt)
+    if not pos then return false end
+
+-- NO ROBAR PROMPTS DE MI PROPIO PLOT
+local plot = prompt:FindFirstAncestorOfClass("Model")
+if plot then
+    local plots = workspace:FindFirstChild("Plots")
+    if plots then
+        local parentPlot = prompt:FindFirstAncestorWhichIsA("Model")
+        while parentPlot and parentPlot.Parent ~= plots do
+            parentPlot = parentPlot.Parent
+        end
+
+        if parentPlot then
+            local sign = parentPlot:FindFirstChild("PlotSign")
+            if sign then
+                local gui = sign:FindFirstChildWhichIsA("SurfaceGui", true)
+                local label = gui and gui:FindFirstChildWhichIsA("TextLabel", true)
+
+                if label then
+                    local txt = label.Text:lower()
+                    if txt:find(game.Players.LocalPlayer.Name:lower(), 1, true)
+                    or txt:find(game.Players.LocalPlayer.DisplayName:lower(), 1, true) then
+                        return false
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- SOLO NEAREST RESPETA BOXES
+if _G.NEAREST_INSTANT_MODE == true then
+    local playerBox = getBoxIndex(hrpPos)
+    local promptBox = getBoxIndex(pos)
+
+    if not playerBox or playerBox ~= promptBox then
+        return false
+    end
+end
+
+-- SI ESTA EN NEAREST + INSTANT STEAL NO USAR TABLA
+if not (_G.NEAREST_INSTANT_MODE == true) then
+    if not promptMatchesSelectedPet(prompt) then
+        return false
+    end
+end
+
+    local maxDist = (typeof(prompt.MaxActivationDistance) == "number" and prompt.MaxActivationDistance > 0)
+        and prompt.MaxActivationDistance
+        or CONFIG.RADIUS
+
+    local effective = math.min(CONFIG.RADIUS, maxDist)
+
+    return (pos - hrpPos).Magnitude <= effective
+end
+
+------------------------------------------------
+-- FIRE
+------------------------------------------------
+local function canFire(prompt, debounce)
+    local t = os.clock()
+    local last = lastFire[prompt]
+    if last and (t - last) < debounce then
+        return false
+    end
+    lastFire[prompt] = t
+    return true
+end
+
+local function firePrompt(prompt, burst, debounce)
+    if not prompt or not prompt.Parent then return end
+    if not prompt.Enabled then return end
+    if not canFire(prompt, debounce) then return end
+
+    for i = 1, burst do
+        pcall(function()
+            fireproximityprompt(prompt, 0)
+        end)
+    end
+end
+
+------------------------------------------------
+-- PROMPT TRACK
+------------------------------------------------
+local function trackPrompt(prompt)
+    if trackedPrompts[prompt] then return end
+    trackedPrompts[prompt] = true
+
+    local function tryInstantEnableFire()
+        local hrp = getHRP()
+        if not hrp then return end
+        local myPos = hrp.Position
+
+        if isPromptAvailable(prompt, myPos) then
+            CONFIG.AUTO_STEAL = true
+
+            local now = os.clock()
+            local le = lastEnableFire[prompt]
+
+            if not le or (now - le) >= ENABLE_COOLDOWN then
+                lastEnableFire[prompt] = now
+                firePrompt(prompt, ENABLE_BURST, ENABLE_DEBOUNCE)
+            end
+        end
+    end
+
+    task.defer(function()
+        tryInstantEnableFire()
+    end)
+
+    pcall(function()
+        prompt:GetPropertyChangedSignal("Enabled"):Connect(function()
+            if prompt.Enabled then
+                tryInstantEnableFire()
+            end
+        end)
+    end)
+
+    prompt.AncestryChanged:Connect(function()
+        if not prompt:IsDescendantOf(workspace) then
+            trackedPrompts[prompt] = nil
+            lastFire[prompt] = nil
+            lastEnableFire[prompt] = nil
+        end
+    end)
+end
+
+------------------------------------------------
+-- SCAN
+------------------------------------------------
+local function scanBrainrotPrompts()
+    local plots = workspace:FindFirstChild("Plots")
+    if not plots then return end
+
+    for _, plot in ipairs(plots:GetChildren()) do
+        local podiums = plot:FindFirstChild("AnimalPodiums")
+        if podiums then
+            for _, obj in ipairs(podiums:GetDescendants()) do
+                if obj:IsA("ProximityPrompt") then
+                    trackPrompt(obj)
+                end
+            end
+        end
+    end
+end
+
+scanBrainrotPrompts()
+
+workspace.DescendantAdded:Connect(function(obj)
+    if obj:IsA("ProximityPrompt") and obj:FindFirstAncestor("AnimalPodiums") then
+        trackPrompt(obj)
+    end
+end)
+
+------------------------------------------------
+-- BACKUP LOOP
+------------------------------------------------
+task.spawn(function()
+    while task.wait(_G.getSafePollRate()) do
+
+        local hrp = getHRP()
+
+        if not hrp then
+            CONFIG.AUTO_STEAL = false
+            continue
+        end
+
+        local myPos = hrp.Position
+        local anyAvailable = false
+
+        for prompt in pairs(trackedPrompts) do
+            if isPromptAvailable(prompt, myPos) then
+                anyAvailable = true
+
+                if CONFIG.AUTO_STEAL then
+                    firePrompt(prompt, FIRE_BURST, FIRE_DEBOUNCE)
+                end
+            end
+        end
+
+        CONFIG.AUTO_STEAL = anyAvailable
+    end
+end)
+
+end
+
+-- ============================================================
+-- SYNC
+-- ============================================================
+do
+
+    local Sync = require(game.ReplicatedStorage:WaitForChild("Packages"):WaitForChild("Synchronizer"))
+    local patched = 0
+
+    for name, fn in pairs(Sync) do
+        if typeof(fn) ~= "function" then continue end
+        if isexecutorclosure(fn) then continue end
+
+        local ok, ups = pcall(debug.getupvalues, fn)
+        if not ok then continue end
+
+        for idx, val in pairs(ups) do
+            if typeof(val) == "function" and not isexecutorclosure(val) then
+                local ok2, innerUps = pcall(debug.getupvalues, val)
+                if ok2 then
+                    local hasBoolean = false
+                    for _, v in pairs(innerUps) do
+                        if typeof(v) == "boolean" then
+                            hasBoolean = true
+                            break
+                        end
+                    end
+                    if hasBoolean then
+                        debug.setupvalue(fn, idx, newcclosure(function() end))
+                        patched += 1
+                    end
+                end
+            end
+        end
+    end
+    print("MOGGED BY HAZE")
+end
+
+-- ============================================================
+-- SERVICIOS DE ROBLOX
+-- ============================================================
+local Services = {
+    Players = game:GetService("Players"),
+    RunService = game:GetService("RunService"),
+    UserInputService = game:GetService("UserInputService"),
+    ReplicatedStorage = game:GetService("ReplicatedStorage"),
+    TweenService = game:GetService("TweenService"),
+    HttpService = game:GetService("HttpService"),
+    Workspace = game:GetService("Workspace"),
+    Lighting = game:GetService("Lighting"),
+    VirtualInputManager = game:GetService("VirtualInputManager"),
+    GuiService = game:GetService("GuiService"),
+    TeleportService = game:GetService("TeleportService"),
+}
+local Players = Services.Players
+local RunService = Services.RunService
+local UserInputService = Services.UserInputService
+local ReplicatedStorage = Services.ReplicatedStorage
+local TweenService = Services.TweenService
+local HttpService = Services.HttpService
+local Workspace = Services.Workspace
+local Lighting = Services.Lighting
+local VirtualInputManager = Services.VirtualInputManager
+local GuiService = Services.GuiService
+local TeleportService = Services.TeleportService
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+
+-- ============================================================
+-- HAZE DESYNC (NO PANEL UI)
+-- Integra la logica de HAZE DESYNC sin crear la ventana "Desync Active".
+-- Mantiene: visualizer SERVER POS, hook raknet y Unwalk por tecla K.
+-- ============================================================
+do
+    local DesyncPlayers = game:GetService("Players")
+    local DesyncUserInputService = game:GetService("UserInputService")
+    local DesyncRunService = game:GetService("RunService")
+    local DesyncCoreGui = game:GetService("CoreGui")
+    local DesyncLocalPlayer = DesyncPlayers.LocalPlayer
+
+    while not DesyncLocalPlayer do
+        task.wait()
+        DesyncLocalPlayer = DesyncPlayers.LocalPlayer
+    end
+
+    -- Borra solo la UI vieja del desync, no crea ningun panel nuevo.
+    pcall(function()
+        local oldGui = DesyncCoreGui:FindFirstChild("LarrupsDesync")
+        if oldGui then
+            oldGui:Destroy()
+        end
+    end)
+
+    -- Limpia visualizers viejos para evitar duplicados si ejecutan el script varias veces.
+    pcall(function()
+        for _, v in ipairs(workspace:GetDescendants()) do
+            if v.Name == "DesyncVisualizer" or v.Name == "DesyncBeam" or v.Name == "DesyncGui" then
+                pcall(function()
+                    v:Destroy()
+                end)
+            end
+        end
+    end)
+
+    local function getDesyncCharacter()
+        return DesyncLocalPlayer and DesyncLocalPlayer.Character or nil
+    end
+
+    local function getDesyncHRP()
+        local char = getDesyncCharacter()
+        if not char then return nil end
+        return char:FindFirstChild("HumanoidRootPart")
+    end
+
+    local unwalkEnabled = false
+    local BALL_COLOR = Color3.fromRGB(60, 120, 220)
+    local VISUAL_Y_OFFSET = -1
+
+    local visualPart = nil
+    local visualGui = nil
+    local visualText = nil
+    local partAttachment = nil
+    local hrpAttachment = nil
+    local serverPos = nil
+    local lastRealPos = nil
+    local cframeConn = nil
+    local beam = nil
+
+    local function destroyVisualizer()
+        if cframeConn then
+            cframeConn:Disconnect()
+            cframeConn = nil
+        end
+
+        if visualPart then
+            pcall(function()
+                visualPart:Destroy()
+            end)
+            visualPart = nil
+        end
+
+        visualGui = nil
+        visualText = nil
+        beam = nil
+        partAttachment = nil
+        hrpAttachment = nil
+    end
+
+    local function attachVisualizer(char)
+        destroyVisualizer()
+
+        if not char then return end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+
+        serverPos = hrp.Position
+        lastRealPos = hrp.Position
+
+        visualPart = Instance.new("Part")
+        visualPart.Name = "DesyncVisualizer"
+        visualPart.Shape = Enum.PartType.Ball
+        visualPart.Size = Vector3.new(2.2, 2.2, 2.2)
+        visualPart.Color = BALL_COLOR
+        visualPart.Material = Enum.Material.SmoothPlastic
+        visualPart.Transparency = 0
+        visualPart.Reflectance = 0
+        visualPart.TopSurface = Enum.SurfaceType.Smooth
+        visualPart.BottomSurface = Enum.SurfaceType.Smooth
+        visualPart.LeftSurface = Enum.SurfaceType.Smooth
+        visualPart.RightSurface = Enum.SurfaceType.Smooth
+        visualPart.FrontSurface = Enum.SurfaceType.Smooth
+        visualPart.BackSurface = Enum.SurfaceType.Smooth
+        visualPart.CanCollide = false
+        visualPart.CanTouch = false
+        visualPart.CanQuery = false
+        visualPart.CastShadow = false
+        visualPart.Anchored = true
+        visualPart.Locked = true
+        visualPart.CFrame = CFrame.new(serverPos + Vector3.new(0, VISUAL_Y_OFFSET, 0))
+        visualPart.Parent = workspace
+
+        partAttachment = Instance.new("Attachment")
+        partAttachment.Parent = visualPart
+
+        hrpAttachment = Instance.new("Attachment")
+        hrpAttachment.Parent = hrp
+
+        visualGui = Instance.new("BillboardGui")
+        visualGui.Name = "DesyncGui"
+        visualGui.Size = UDim2.new(0, 200, 0, 50)
+        visualGui.StudsOffset = Vector3.new(0, 3, 0)
+        visualGui.AlwaysOnTop = true
+        visualGui.Enabled = true
+        visualGui.Parent = visualPart
+
+        visualText = Instance.new("TextLabel")
+        visualText.Size = UDim2.new(1, 0, 1, 0)
+        visualText.BackgroundTransparency = 1
+        visualText.Font = Enum.Font.GothamBlack
+        visualText.TextColor3 = Color3.fromRGB(255, 255, 255)
+        visualText.TextStrokeColor3 = Color3.new(0, 0, 0)
+        visualText.TextStrokeTransparency = 0
+        visualText.TextScaled = false
+        visualText.TextSize = 12
+        visualText.Text = "SERVER POS\n0.0 studs"
+        visualText.Parent = visualGui
+
+        cframeConn = hrp:GetPropertyChangedSignal("CFrame"):Connect(function()
+            if not hrp or not hrp.Parent then return end
+
+            local currentPos = hrp.Position
+
+            if not serverPos then
+                serverPos = currentPos
+            end
+
+            if not lastRealPos then
+                lastRealPos = currentPos
+            end
+
+            -- Solo resetea serverPos en cambios grandes, igual que el HAZE DESYNC original.
+            if (currentPos - lastRealPos).Magnitude > 1 then
+                serverPos = currentPos
+            end
+
+            lastRealPos = currentPos
+        end)
+    end
+
+    local function applyUnwalk()
+        local char = getDesyncCharacter()
+        if not char then return end
+        local animate = char:FindFirstChild("Animate")
+        if animate then
+            animate.Disabled = true
+        end
+    end
+
+    local function disableUnwalk()
+        local char = getDesyncCharacter()
+        if not char then return end
+        local animate = char:FindFirstChild("Animate")
+        if animate then
+            animate.Disabled = false
+        end
+    end
+
+    local function setUnwalk(state)
+        unwalkEnabled = state == true
+        if unwalkEnabled then
+            applyUnwalk()
+        else
+            disableUnwalk()
+        end
+    end
+
+    local function toggleUnwalk()
+        setUnwalk(not unwalkEnabled)
+    end
+
+    -- Por si quieres llamarlo desde otra parte del hub despues.
+    _G.HazeDesync = _G.HazeDesync or {}
+    _G.HazeDesync.ToggleUnwalk = toggleUnwalk
+    _G.HazeDesync.SetUnwalk = setUnwalk
+    _G.HazeDesync.DestroyVisualizer = destroyVisualizer
+    _G.HazeDesync.AttachVisualizer = attachVisualizer
+
+    DesyncLocalPlayer.CharacterAdded:Connect(function(char)
+        local hrp = char:WaitForChild("HumanoidRootPart", 8)
+        task.wait(0.1)
+        if hrp then
+            attachVisualizer(char)
+        end
+        task.wait(0.4)
+        if unwalkEnabled then
+            applyUnwalk()
+        else
+            disableUnwalk()
+        end
+    end)
+
+    task.spawn(function()
+        repeat task.wait() until game:IsLoaded()
+
+        local char = getDesyncCharacter()
+        if char and char:FindFirstChild("HumanoidRootPart") then
+            attachVisualizer(char)
+        end
+
+        DesyncRunService.RenderStepped:Connect(function()
+            local hrp = getDesyncHRP()
+            if not hrp then return end
+
+            if not visualPart or not visualPart.Parent then
+                attachVisualizer(hrp.Parent)
+                return
+            end
+
+            if hrpAttachment and hrpAttachment.Parent ~= hrp then
+                hrpAttachment:Destroy()
+                hrpAttachment = Instance.new("Attachment")
+                hrpAttachment.Parent = hrp
+                if beam then
+                    beam.Attachment0 = hrpAttachment
+                end
+            end
+
+            if not serverPos then
+                serverPos = hrp.Position
+            end
+
+            visualPart.CFrame = CFrame.new(serverPos + Vector3.new(0, VISUAL_Y_OFFSET, 0))
+
+            if visualText then
+                visualText.TextColor3 = Color3.fromRGB(255, 255, 255)
+                visualText.Text = string.format("SERVER POS\n%.1f studs", (serverPos - hrp.Position).Magnitude)
+            end
+        end)
+
+        if raknet and raknet.add_send_hook then
+            raknet.add_send_hook(function(packet)
+                if packet.PacketId == 0x1B then
+                    local b = packet.AsBuffer
+                    buffer.writeu32(b, 1, 0xFFFFFFFF)
+                    packet:SetData(b)
+                end
+            end)
+        end
+    end)
+
+    -- Sin panel UI: mantiene la logica de Unwalk con tecla K.
+    DesyncUserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.KeyCode == Enum.KeyCode.K then
+            toggleUnwalk()
+        end
+    end)
+
+    task.spawn(function()
+        task.wait(0.5)
+        if not unwalkEnabled then
+            disableUnwalk()
+        end
+    end)
+
+    print("HAZE DESYNC NO UI loaded")
+end
+
+local Decrypted
+Decrypted = setmetatable({}, {
+    __index = function(S, ez)
+        local Netty = ReplicatedStorage.Packages.Net
+        local prefix, path
+        if     ez:sub(1,3) == "RE/" then prefix = "RE/";  path = ez:sub(4)
+        elseif ez:sub(1,3) == "RF/" then prefix = "RF/";  path = ez:sub(4)
+        else return nil end
+        local Remote
+        for i, v in Netty:GetChildren() do
+            if v.Name == ez then
+                Remote = Netty:GetChildren()[i + 1]
+                break
+            end
+        end
+        if Remote and not rawget(Decrypted, ez) then rawset(Decrypted, ez, Remote) end
+        return rawget(Decrypted, ez)
+    end
+})
+local Utility = {}
+function Utility:LarpNet(F) return Decrypted[F] end
+local Camera = Workspace.CurrentCamera
+local Mouse = LocalPlayer:GetMouse()
+
+local function isMobile()
+    return UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled and not UserInputService.MouseEnabled
+end
+
+local IS_MOBILE = isMobile()
+
+
+-- ============================================================
+-- CONFIGURACION / SETTINGS
+-- ============================================================
+local FileName = "HazeHub.json" 
+local DefaultConfig = {
+    Positions = {
+        AdminPanel = {X = 0.1859375, Y = 0.5767123526556385, OffsetX = 0, OffsetY = 0}, 
+        StealSpeed = {X = 0.02, Y = 0.18}, 
+        Settings = {X = 0.834375, Y = 0.43590998043052839}, 
+        InvisPanel = {X = 0.8578125, Y = 0.17260276361454258, OffsetX = 0, OffsetY = 0}, 
+        AutoSteal = {X = 0.02, Y = 0.35, OffsetX = 0, OffsetY = 0}, 
+        MobileControls = {X = 0.9, Y = 0.4},
+        MobileBtn_TP = {X = 0.5, Y = 0.4},
+        MobileBtn_CL = {X = 0.5, Y = 0.4},
+        MobileBtn_SP = {X = 0.5, Y = 0.4},
+        MobileBtn_IV = {X = 0.5, Y = 0.4},
+        MobileBtn_UI = {X = 0.5, Y = 0.4},
+        MobileBtn_KICK = {X = 0.5, Y = 0.4},
+        JobJoiner = {X = 0.5, Y = 0.85},
+        TargetControls = {X = 0.26, Y = 0.35, OffsetX = 0, OffsetY = 0},
+    }, 
+    TpSettings = {
+        Tool           = "Flying Carpet",
+        Speed          = 2, 
+        TpKey          = "T",
+        CloneKey       = "V",
+        TpOnLoad       = false,
+        MinGenForTp    = "",
+        CarpetSpeedKey = "Q",
+        InfiniteJump   = false,
+        TeleportV2     = false,
+    },
+    StealSpeed   = 20,
+    ShowStealSpeedPanel = true,
+    MenuKey      = "LeftControl",
+    MobileGuiScale = 0.5,
+    XrayEnabled  = true,
+    AntiRagdoll  = 0,
+    AntiRagdollV2 = false,
+    PlayerESP    = true,
+    FPSBoost     = true,
+    FPSBoostV2   = false,
+    TracerEnabled = true,
+    BrainrotESP = true,
+    TimerESP = false,
+    Float = false,
+    FloatKeybind = "Z",
+    LineToBase = false,
+    StealNearest = false,
+    StealHighest = true,
+    StealPriority = false,
+    DefaultToNearest = false,
+    DefaultToHighest = false,
+    DefaultToPriority = false,
+    UILocked     = false,
+    HideAdminPanel = false,
+    HideAutoSteal = false,
+    CompactAutoSteal = false,
+    AutoKickOnSteal = false,
+    InstantSteal = false,
+    InvisStealAngle = 233,
+    SinkSliderValue = 5,
+    AutoRecoverLagback = true,
+    AutoInvisDuringSteal = false,
+    InvisToggleKey = "I",
+    ClickToAP = false,
+    ClickToAPKeybind = "L",
+    DisableClickToAPOnMoby = false,
+    ProximityAP = false,
+    ProximityAPKeybind = "P",
+    ProximityRange = 15,
+    StealSpeedKey = "C",
+    ShowInvisPanel = true,
+    ResetKey = "X",
+    AutoResetOnBalloon = false,
+    AntiBeeDisco = false,
+    AutoDestroyTurrets = false,
+    FOV = 70,
+    SubspaceMineESP = false,
+    AutoUnlockOnSteal = false,
+    ShowUnlockButtonsHUD = false,
+    AutoTPOnFailedSteal = false,
+    AutoKickOnSteal = false,
+    AutoTPPriority = true,
+    KickKey = "",
+    CleanErrorGUIs = false,
+    ClickToAPSingleCommand = false,
+    RagdollSelfKey = "",
+    AlertsEnabled = true,
+    AlertSoundID = "rbxassetid://6518811702",
+    DisableProximitySpamOnMoby = false,
+    CancelAPPanelOnMoby = true,
+    DisableClickToAPOnKawaifu = false,
+    DisableProximitySpamOnKawaifu = false,
+    CancelAPPanelOnKawaifu = true,
+    AutoStealSpeed = false,
+    ShowJobJoiner = true,
+    ShowMobileActionButtons = true,
+    JobJoinerKey = "J",
+
+    PriorityList = {
+       "Strawberry Elephant",
+       "Meowl",
+       "Skibidi Toilet",
+       "Headless Horseman",
+       "Dragon Gingerini",
+       "Dragon Cannelloni",
+       "Ketupat Bros",
+       "Hydra Dragon Cannelloni",
+       "La Supreme Combinasion",
+       "Love Love Bear",
+       "Ginger Gerat",
+       "Cerberus",
+       "Capitano Moby",
+       "La Casa Boo",
+       "Burguro and Fryuro",
+       "Spooky and Pumpky",
+       "Cooki and Milki",
+       "Rosey and Teddy",
+       "Popcuru and Fizzuru",
+       "Reinito Sleighito",
+       "Fragrama and Chocrama",
+       "Garama and Madundung",
+       "Ketchuru and Musturu",
+       "La Secret Combinasion",
+       "Tralaledon",
+       "Tictac Sahur",
+       "Ketupat Kepat",
+       "Tang Tang Keletang",
+       "Orcaledon",
+       "La Ginger Sekolah",
+       "Los Spaghettis",
+       "Lavadorito Spinito",
+       "Swaggy Bros",
+       "La Taco Combinasion",
+       "Los Primos",
+       "Chillin Chili",
+       "Tuff Toucan",
+       "W or L",
+       "Chillin Chili",
+       "Chipso and Queso"
+    },
+
+}
+
+
+function DeepCopy(tbl)
+    if type(tbl) ~= "table" then return tbl end
+    local out = {}
+    for k, v in pairs(tbl) do
+        out[k] = DeepCopy(v)
+    end
+    return out
+end
+
+function MergeDefaults(target, defaults)
+    for k, v in pairs(defaults) do
+        if type(v) == "table" then
+            if type(target[k]) ~= "table" then
+                target[k] = DeepCopy(v)
+            else
+                MergeDefaults(target[k], v)
+            end
+        elseif target[k] == nil then
+            target[k] = v
+        end
+    end
+end
+
+local Config = DeepCopy(DefaultConfig)
+
+function NormalizeKeyName(keyName, fallback)
+    if type(keyName) ~= "string" or keyName == "" then
+        return fallback
+    end
+
+    local aliases = {
+        ALT = "LeftAlt",
+        LALT = "LeftAlt",
+        RALT = "RightAlt",
+        CTRL = "LeftControl",
+        CONTROL = "LeftControl",
+        LCTRL = "LeftControl",
+        RCTRL = "RightControl",
+        SHIFT = "LeftShift",
+        LSHIFT = "LeftShift",
+        RSHIFT = "RightShift",
+        WIN = "LeftSuper",
+        CMD = "LeftSuper",
+        META = "LeftSuper",
+    }
+
+    local upper = string.upper(keyName)
+    local normalized = aliases[upper] or keyName
+    return Enum.KeyCode[normalized] and normalized or fallback
+end
+
+function PrettyKeyName(keyName)
+    local map = {
+        LeftAlt = "ALT",
+        RightAlt = "RALT",
+        LeftControl = "CTRL",
+        RightControl = "RCTRL",
+        LeftShift = "SHIFT",
+        RightShift = "RSHIFT",
+        LeftSuper = "WIN",
+        RightSuper = "RWIN",
+    }
+    return map[keyName] or tostring(keyName or "")
+end
+
+if isfile and isfile(FileName) then
+    pcall(function()
+        local raw = readfile(FileName)
+        if not raw or raw == "" then return end
+        local decoded = HttpService:JSONDecode(raw)
+        if type(decoded) ~= "table" then return end
+        local savedPriorityList = nil
+        if type(decoded.PriorityList) == "table" then
+            savedPriorityList = DeepCopy(decoded.PriorityList)
+        end
+        MergeDefaults(decoded, DefaultConfig)
+        if savedPriorityList ~= nil then
+            decoded.PriorityList = savedPriorityList
+        end
+        Config = decoded
+    end)
+end
+Config.ProximityAP = false
+if type(Config.CancelAPPanelOnMoby) ~= "boolean" then
+    Config.CancelAPPanelOnMoby = true
+end
+if type(Config.CancelAPPanelOnKawaifu) ~= "boolean" then
+    Config.CancelAPPanelOnKawaifu = true
+end
+
+function EnsureSavedKeybinds()
+    Config.SavedKeybinds = Config.SavedKeybinds or {}
+    Config.SavedKeybinds.MenuKey = NormalizeKeyName(Config.SavedKeybinds.MenuKey or Config.MenuKey, DefaultConfig.MenuKey or "LeftControl")
+    Config.SavedKeybinds.ClickToAPKeybind = NormalizeKeyName(Config.SavedKeybinds.ClickToAPKeybind or Config.ClickToAPKeybind, DefaultConfig.ClickToAPKeybind or "L")
+    Config.SavedKeybinds.ProximityAPKeybind = NormalizeKeyName(Config.SavedKeybinds.ProximityAPKeybind or Config.ProximityAPKeybind, DefaultConfig.ProximityAPKeybind or "P")
+    Config.SavedKeybinds.StealSpeedKey = NormalizeKeyName(Config.SavedKeybinds.StealSpeedKey or Config.StealSpeedKey, DefaultConfig.StealSpeedKey or "C")
+    Config.SavedKeybinds.FloatKeybind = NormalizeKeyName(Config.SavedKeybinds.FloatKeybind or Config.FloatKeybind, DefaultConfig.FloatKeybind or "Z")
+    Config.SavedKeybinds.ResetKey = NormalizeKeyName(Config.SavedKeybinds.ResetKey or Config.ResetKey, DefaultConfig.ResetKey or "X")
+    Config.SavedKeybinds.JobJoinerKey = NormalizeKeyName(Config.SavedKeybinds.JobJoinerKey or Config.JobJoinerKey, DefaultConfig.JobJoinerKey or "J")
+    Config.SavedKeybinds.InvisToggleKey = NormalizeKeyName(Config.SavedKeybinds.InvisToggleKey or Config.InvisToggleKey, DefaultConfig.InvisToggleKey or "I")
+    Config.SavedKeybinds.KickKey = NormalizeKeyName(Config.SavedKeybinds.KickKey or Config.KickKey, "")
+    Config.SavedKeybinds.RagdollSelfKey = NormalizeKeyName(Config.SavedKeybinds.RagdollSelfKey or Config.RagdollSelfKey, "")
+    Config.SavedKeybinds.TpKey = NormalizeKeyName(Config.SavedKeybinds.TpKey or Config.TpSettings.TpKey, DefaultConfig.TpSettings.TpKey or "T")
+    Config.SavedKeybinds.CloneKey = NormalizeKeyName(Config.SavedKeybinds.CloneKey or Config.TpSettings.CloneKey, DefaultConfig.TpSettings.CloneKey or "V")
+    Config.SavedKeybinds.CarpetSpeedKey = NormalizeKeyName(Config.SavedKeybinds.CarpetSpeedKey or Config.TpSettings.CarpetSpeedKey, DefaultConfig.TpSettings.CarpetSpeedKey or "Q")
+end
+
+function ApplySavedKeybindsToConfig()
+    EnsureSavedKeybinds()
+    Config.MenuKey = Config.SavedKeybinds.MenuKey
+    Config.ClickToAPKeybind = Config.SavedKeybinds.ClickToAPKeybind
+    Config.ProximityAPKeybind = Config.SavedKeybinds.ProximityAPKeybind
+    Config.StealSpeedKey = Config.SavedKeybinds.StealSpeedKey
+    Config.FloatKeybind = Config.SavedKeybinds.FloatKeybind
+    Config.ResetKey = Config.SavedKeybinds.ResetKey
+    Config.JobJoinerKey = Config.SavedKeybinds.JobJoinerKey
+    Config.InvisToggleKey = Config.SavedKeybinds.InvisToggleKey
+    Config.KickKey = Config.SavedKeybinds.KickKey
+    Config.RagdollSelfKey = Config.SavedKeybinds.RagdollSelfKey
+    Config.TpSettings.TpKey = Config.SavedKeybinds.TpKey
+    Config.TpSettings.CloneKey = Config.SavedKeybinds.CloneKey
+    Config.TpSettings.CarpetSpeedKey = Config.SavedKeybinds.CarpetSpeedKey
+end
+
+local function getAutoSnipeDelayFromOption(option)
+    local map = {
+        [1] = 0.10,
+        [2] = 0.20,
+        [3] = 0.30,
+        [4] = 0.40,
+    }
+    return map[tonumber(option)] or 0.10
+end
+
+function NormalizeAllKeybinds()
+    EnsureSavedKeybinds()
+    ApplySavedKeybindsToConfig()
+end
+
+NormalizeAllKeybinds()
+
+-- ============================================================
+-- GUARDADO DE CONFIG
+-- ============================================================
+local function SaveConfig()
+    if writefile then
+        pcall(function()
+            NormalizeAllKeybinds()
+            local toSave = DeepCopy(Config)
+            toSave.ProximityAP = false
+            toSave.MenuKey = Config.SavedKeybinds.MenuKey
+            toSave.ClickToAPKeybind = Config.SavedKeybinds.ClickToAPKeybind
+            toSave.ProximityAPKeybind = Config.SavedKeybinds.ProximityAPKeybind
+            toSave.StealSpeedKey = Config.SavedKeybinds.StealSpeedKey
+            toSave.FloatKeybind = Config.SavedKeybinds.FloatKeybind
+            toSave.ResetKey = Config.SavedKeybinds.ResetKey
+            toSave.JobJoinerKey = Config.SavedKeybinds.JobJoinerKey
+            toSave.InvisToggleKey = Config.SavedKeybinds.InvisToggleKey
+            toSave.KickKey = Config.SavedKeybinds.KickKey
+            toSave.RagdollSelfKey = Config.SavedKeybinds.RagdollSelfKey
+            toSave.TpSettings.TpKey = Config.SavedKeybinds.TpKey
+            toSave.TpSettings.CloneKey = Config.SavedKeybinds.CloneKey
+            toSave.TpSettings.CarpetSpeedKey = Config.SavedKeybinds.CarpetSpeedKey
+            writefile(FileName, HttpService:JSONEncode(toSave))
+        end)
+    end
+end
+
+local function isMobyUser(player)
+    if not player or not player.Character then return false end
+    return player.Character:FindFirstChild("_moby_highlight") ~= nil
+end
+
+local HighlightName = "KaWaifu_NeonHighlight"
+local function isKawaifuUser(player)
+    if not player or not player.Character then return false end
+    return player.Character:FindFirstChild(HighlightName) ~= nil
+end
+
+_G.InvisStealAngle = Config.InvisStealAngle
+_G.SinkSliderValue = Config.SinkSliderValue
+_G.AutoRecoverLagback = Config.AutoRecoverLagback
+_G.AutoInvisDuringSteal = Config.AutoInvisDuringSteal
+    _G.INVISIBLE_STEAL_KEY = Enum.KeyCode[Config.InvisToggleKey] or Enum.KeyCode.I
+_G.invisibleStealEnabled = false
+_G.RecoveryInProgress = false
+
+local function getControls()
+	local playerScripts = LocalPlayer:WaitForChild("PlayerScripts")
+	local playerModule = require(playerScripts:WaitForChild("PlayerModule"))
+	return playerModule:GetControls()
+end
+
+local Controls = getControls()
+
+local function kickPlayer()
+    local ok = pcall(function()
+        game:Shutdown()
+    end)
+    if ok then return end
+    pcall(function()
+        LocalPlayer:Kick("")
+    end)
 end
 
 local function walkForward(seconds)
-    local char, hrp, hum = getCharacter()
-    if not hrp or not hum then return end
+    local char = LocalPlayer.Character
+    local hum = char:FindFirstChild("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local Controls = getControls()
     local lookVector = hrp.CFrame.LookVector
+    Controls:Disable()
     local startTime = os.clock()
     local conn
     conn = RunService.RenderStepped:Connect(function()
         if os.clock() - startTime >= seconds then
             conn:Disconnect()
             hum:Move(Vector3.zero, false)
+            Controls:Enable()
             return
         end
         hum:Move(lookVector, false)
     end)
 end
 
-local function equipTool(toolName)
-    local char, _, hum = getCharacter()
-    if not hum then return end
-    local tool = LocalPlayer.Backpack:FindFirstChild(toolName) or char:FindFirstChild(toolName)
-    if tool and tool.Parent ~= char then
-        hum:EquipTool(tool)
-        task.wait(0.02)
+
+-- ============================================================
+-- CLONE SYSTEM
+-- ============================================================
+local function instantClone()
+    local Players = game:GetService("Players")
+    local LocalPlayer = Players.LocalPlayer
+    if not LocalPlayer then return end
+    local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+
+    local cloner = LocalPlayer.Backpack:FindFirstChild("Quantum Cloner")
+        or character:FindFirstChild("Quantum Cloner")
+    if not cloner then return end
+
+    if cloner.Parent ~= character then
+        humanoid:EquipTool(cloner)
     end
-    return tool
+
+    -- Wait for ToolsFrames.QuantumCloner.TeleportToClone to exist
+    local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+    local tpButton = nil
+    local deadline = os.clock() + 2.0
+    while os.clock() < deadline do
+        local toolsFrames = PlayerGui:FindFirstChild("ToolsFrames")
+        local qcFrame = toolsFrames and toolsFrames:FindFirstChild("QuantumCloner")
+        tpButton = qcFrame and qcFrame:FindFirstChild("TeleportToClone")
+        if tpButton then break end
+        task.wait(0.05)
+    end
+    if not tpButton then return end
+
+    cloner:Activate()
+    task.wait(0.05)
+
+    tpButton.Visible = true
+    if typeof(firesignal) == "function" then
+        firesignal(tpButton.MouseButton1Up)
+        if _G.triggerSafePollBoost then
+            _G.triggerSafePollBoost()
+        end
+    end
 end
 
-local function findAdorneeGlobal(animalData)
-    if not animalData then return nil end
-    local plot = Workspace:FindFirstChild("Plots") and Workspace.Plots:FindFirstChild(animalData.plot)
-    if not plot then return nil end
-    local podiums = plot:FindFirstChild("AnimalPodiums")
-    if not podiums then return nil end
-    local podium = podiums:FindFirstChild(animalData.slot)
-    if not podium then return nil end
-    local base = podium:FindFirstChild("Base")
-    if not base then return nil end
-    local spawn = base:FindFirstChild("Spawn")
-    if spawn then return spawn end
-    return base:FindFirstChildWhichIsA("BasePart") or base
+
+local function waitSecondsHeartbeat(sec)
+    local t = 0
+    while t < sec do
+        t += RunService.Heartbeat:Wait()
+    end
 end
+
+local function waitUntilHeartbeat(predicate, timeoutSec)
+    local t = 0
+    while true do
+        if predicate() then return true end
+        local dt = RunService.Heartbeat:Wait()
+        t += dt
+        if timeoutSec and t >= timeoutSec then
+            return false
+        end
+    end
+end
+
 
 local function getClosestBaseSign(brainrotPart)
-    if not brainrotPart then return nil end
-    local closest, bestDist = nil, math.huge
-    for _, label in ipairs(workspace:GetDescendants()) do
+    if not brainrotPart or not brainrotPart:IsA("BasePart") then return nil end
+
+    local closestPart = nil
+    local closestDist = math.huge
+
+    for _, label in ipairs(Workspace:GetDescendants()) do
         if label:IsA("TextLabel") then
             local txt = tostring(label.Text or "")
-            if txt:lower():find("base") then
+            if txt ~= "" and txt:lower():find("base", 1, true) then
                 local gui = label:FindFirstAncestorWhichIsA("SurfaceGui")
                 if gui then
                     local part = gui.Adornee or gui.Parent
                     if part and part:IsA("BasePart") then
                         local dist = (part.Position - brainrotPart.Position).Magnitude
-                        if dist < bestDist then
-                            bestDist = dist
-                            closest = part
+                        if dist < closestDist then
+                            closestDist = dist
+                            closestPart = part
                         end
                     end
                 end
             end
         end
     end
-    return closest
+
+    return closestPart
 end
 
--- ==================== Clone ====================
-local function instantClone()
-    local char, hrp, hum = getCharacter()
-    if not hum then return end
-    local cloner = LocalPlayer.Backpack:FindFirstChild("Quantum Cloner") or char:FindFirstChild("Quantum Cloner")
-    if not cloner then return end
-    if cloner.Parent ~= char then hum:EquipTool(cloner); task.wait() end
+local function riseToY(hrp, targetY)
+    if not hrp then return end
+    local MAX_TIME = 3.0
+    local start = os.clock()
 
-    local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
-    local toolsFrames = PlayerGui:FindFirstChild("ToolsFrames")
-    local qcFrame = toolsFrames and toolsFrames:FindFirstChild("QuantumCloner")
-    local tpButton = qcFrame and qcFrame:FindFirstChild("TeleportToClone")
-    if not tpButton then return end
-
-    cloner:Activate()
-    task.wait(0.15)
-
-    if typeof(firesignal) == "function" then
-        pcall(function() firesignal(tpButton.MouseButton1Click) end)
-    else
-        local x = tpButton.AbsolutePosition.X + tpButton.AbsoluteSize.X/2
-        local y = tpButton.AbsolutePosition.Y + tpButton.AbsoluteSize.Y/2
-        VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
-        task.wait(0.05)
-        VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
-    end
-end
-
--- ==================== Teleport ====================
-local function teleportToBrainrot(targetData)
-    local char, hrp, hum = getCharacter()
-    if not hrp or not hum or hum.Health <= 0 then return false end
-
-    local targetPart = findAdorneeGlobal(targetData)
-    if not targetPart then return false end
-
-    -- Equip carpet
-    equipTool(TP_TOOL)
-
-    -- Jump and rise
-    hum:ChangeState(Enum.HumanoidStateType.Jumping)
-    task.wait(0.01)
-    riseToY(hrp, 40)
-
-    -- Get sign position
-    local signPart = getClosestBaseSign(targetPart)
-    if not signPart then return false end
-
-    local signCF = signPart.CFrame
-    local back = -signCF.LookVector
-    local tpPos
-
-    if targetPart.Position.Y <= 7 then
-        tpPos = signPart.Position + (back * 20)
-        tpPos = Vector3.new(tpPos.X, -4.8, tpPos.Z)
-    else
-        tpPos = signPart.Position + (back * 15)
-        tpPos = Vector3.new(tpPos.X, signPart.Position.Y + 4, tpPos.Z)
-    end
-
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    hrp.CFrame = CFrame.new(tpPos)
-    hrp.AssemblyLinearVelocity = Vector3.zero
-
-    -- Wait to land
-    local timeout = os.clock() + 3
-    repeat
+    while hrp.Parent and hrp.Position.Y < targetY do
+        local dist = targetY - hrp.Position.Y
+        local speed = math.clamp(dist * 20, 280, 310)
+        hrp.AssemblyLinearVelocity = Vector3.new(hrp.AssemblyLinearVelocity.X, speed, hrp.AssemblyLinearVelocity.Z)
+        if os.clock() - start > MAX_TIME then
+            break
+        end
         RunService.Heartbeat:Wait()
-        if not hrp.Parent then return false end
-    until (hrp.Position - tpPos).Magnitude <= 2 and hum.FloorMaterial ~= Enum.Material.Air or os.clock() > timeout
-
-    -- Mini teleport / walk
-    if targetPart.Position.Y > 7 then
-        hrp.CFrame = hrp.CFrame * CFrame.new(0, 0, -2.5)
-    else
-        walkForward(0.15)
-    end
-    task.wait(0.07)
-
-    -- Clone to final position
-    instantClone()
-    task.wait(0.5)
-
-    -- Final align
-    if (hrp.Position - targetPart.Position).Magnitude > 3 then
-        hrp.CFrame = CFrame.new(targetPart.Position + Vector3.new(0, 2, 0))
-    end
-    return true
-end
-
--- ==================== Brainrot Scanner ====================
-local allAnimalsCache = {}
-local lastAnimalData = {}
-
-local function getAnimalHash(al)
-    if not al then return "" end
-    local h = ""
-    for slot, d in pairs(al) do
-        if type(d) == "table" then
-            h = h .. tostring(slot) .. tostring(d.Index) .. tostring(d.Mutation)
-        end
-    end
-    return h
-end
-
-local function scanSinglePlot(plot)
-    pcall(function()
-        local ch = Synchronizer:Get(plot.Name)
-        if not ch then return end
-
-        local al = ch:Get("AnimalList")
-        local owner = ch:Get("Owner")
-        if not owner or not owner.Name or not Players:FindFirstChild(owner.Name) then
-            for i = #allAnimalsCache, 1, -1 do
-                if allAnimalsCache[i].plot == plot.Name then table.remove(allAnimalsCache, i) end
-            end
-            return
-        end
-
-        local hash = getAnimalHash(al)
-        if lastAnimalData[plot.Name] == hash then return end
-
-        for i = #allAnimalsCache, 1, -1 do
-            if allAnimalsCache[i].plot == plot.Name then table.remove(allAnimalsCache, i) end
-        end
-
-        for slot, ad in pairs(al) do
-            if type(ad) == "table" then
-                local aName, aInfo = ad.Index, AnimalsData[ad.Index]
-                if aInfo then
-                    local mutation = ad.Mutation or "None"
-                    local gv = AnimalsShared:GetGeneration(aName, ad.Mutation, ad.Traits, nil)
-                    local gt = "$" .. NumberUtils:ToString(gv) .. "/s"
-                    table.insert(allAnimalsCache, {
-                        name = aInfo.DisplayName or aName,
-                        genText = gt,
-                        genValue = gv,
-                        mutation = mutation,
-                        owner = owner.Name,
-                        plot = plot.Name,
-                        slot = tostring(slot),
-                        uid = plot.Name .. "_" .. tostring(slot)
-                    })
-                end
-            end
-        end
-        lastAnimalData[plot.Name] = hash
-        table.sort(allAnimalsCache, function(a,b) return a.genValue > b.genValue end)
-    end)
-end
-
-local function setupPlotListener(plot)
-    scanSinglePlot(plot)
-    plot.DescendantAdded:Connect(function() task.wait(0.1); scanSinglePlot(plot) end)
-    plot.DescendantRemoving:Connect(function() task.wait(0.1); scanSinglePlot(plot) end)
-    task.spawn(function()
-        while plot.Parent do
-            task.wait(5)
-            scanSinglePlot(plot)
-        end
-    end)
-end
-
--- Initialize plots
-local plots = Workspace:WaitForChild("Plots", 8)
-if plots then
-    for _, p in ipairs(plots:GetChildren()) do setupPlotListener(p) end
-    plots.ChildAdded:Connect(function(p) task.wait(0.5); setupPlotListener(p) end)
-end
-
--- ==================== Steal Function ====================
-local promptCache = {}
-local lastFireTime = {}
-
-local function findPromptForAnimal(animalData)
-    if not animalData then return nil end
-    if promptCache[animalData.uid] and promptCache[animalData.uid].Parent then
-        return promptCache[animalData.uid]
     end
 
-    local plot = Workspace.Plots:FindFirstChild(animalData.plot)
-    if not plot then return nil end
-    local podiums = plot:FindFirstChild("AnimalPodiums")
-    if not podiums then return nil end
-    local podium = podiums:FindFirstChild(animalData.slot)
-    if not podium then return nil end
+    hrp.AssemblyLinearVelocity = Vector3.new(hrp.AssemblyLinearVelocity.X, 0, hrp.AssemblyLinearVelocity.Z)
+end
 
-    local base = podium:FindFirstChild("Base")
-    local spawn = base and base:FindFirstChild("Spawn")
-    if not spawn then return nil end
-    local attach = spawn:FindFirstChild("PromptAttachment")
-    if attach then
-        for _, p in ipairs(attach:GetChildren()) do
-            if p:IsA("ProximityPrompt") and p.Enabled then
-                promptCache[animalData.uid] = p
-                return p
-            end
+local function equipTpToolAndWait(hum)
+    if not hum then return nil end
+
+    local char = hum.Parent
+    local toolName = Config.TpSettings.Tool or "Flying Carpet"
+    local tool = LocalPlayer.Backpack:FindFirstChild(toolName) or (char and char:FindFirstChild(toolName))
+
+    if tool then
+        if tool.Parent ~= char then
+            hum:EquipTool(tool)
+        else
+            hum:EquipTool(tool)
         end
+        task.wait(0.02)
     end
 
-    -- Fallback: search plot for nearby prompt
-    local best, bestDist = nil, math.huge
-    for _, desc in ipairs(plot:GetDescendants()) do
-        if desc:IsA("ProximityPrompt") and desc.Enabled then
-            local part = desc.Parent
-            local pos = part and part:IsA("BasePart") and part.Position
-            if pos then
-                local dist = (spawn.Position - pos).Magnitude
-                if dist < 8 and dist < bestDist then
-                    bestDist = dist
-                    best = desc
+    return tool
+end
+
+local function prepMiniTpTool(hum, hrp)
+    if not hum or not hrp then return end
+
+    local char = hum.Parent
+    local toolName = Config.TpSettings.Tool or "Flying Carpet"
+    local tool = LocalPlayer.Backpack:FindFirstChild(toolName) or (char and char:FindFirstChild(toolName))
+    if not tool then return end
+
+    -- En este punto ya debio venir equipado desde antes del TP general.
+    -- Aqui no reequipamos ni esperamos 0.02 para no tocar el tramo de airpos/mini tp.
+end
+
+local UserInputService = game:GetService("UserInputService")
+
+local TP_V2_MED_POINTS = {
+    {name = "MED1", pos = Vector3.new(-410.65, -5.68, -46.10)},
+    {name = "MED2", pos = Vector3.new(-410.91, -5.68, 168.89)},
+}
+
+local TP_V2_SECOND_FLOOR_POINTS = {
+    {name = "TP1",  pos = Vector3.new(-488.88, 15, 196.38), facing = "back"},
+    {name = "TP2",  pos = Vector3.new(-487.79, 15, 138.13), facing = "front"},
+    {name = "TP3",  pos = Vector3.new(-489.38, 15, 89.23),  facing = "back"},
+    {name = "TP4",  pos = Vector3.new(-489.69, 15, 30.98),  facing = "front"},
+    {name = "TP5",  pos = Vector3.new(-488.75, 15, -17.95), facing = "back"},
+    {name = "TP6",  pos = Vector3.new(-490, 15, -75.90), facing = "front"},
+    {name = "TP7",  pos = Vector3.new(-331.75, 15, -75.80), facing = "back"},
+    {name = "TP8",  pos = Vector3.new(-329.98, 15, -18.16), facing = "front"},
+    {name = "TP9",  pos = Vector3.new(-330.04, 15, 31.14),  facing = "back"},
+    {name = "TP10", pos = Vector3.new(-331.28, 15, 88.92),  facing = "front"},
+    {name = "TP11", pos = Vector3.new(-330.57, 15, 138.10), facing = "back"},
+    {name = "TP12", pos = Vector3.new(-330.01, 15, 195.96), facing = "front"},
+}
+
+local function flatDistance(a, b)
+    return (Vector3.new(a.X, 0, a.Z) - Vector3.new(b.X, 0, b.Z)).Magnitude
+end
+
+local function getClosestBaseSignToPosition(worldPos)
+    local closestPart = nil
+    local closestDist = math.huge
+
+    for _, label in ipairs(Workspace:GetDescendants()) do
+        if label:IsA("TextLabel") then
+            local txt = tostring(label.Text or "")
+            if txt ~= "" and txt:lower():find("base", 1, true) then
+                local gui = label:FindFirstAncestorWhichIsA("SurfaceGui")
+                if gui then
+                    local part = gui.Adornee or gui.Parent
+                    if part and part:IsA("BasePart") then
+                        local dist = (part.Position - worldPos).Magnitude
+                        if dist < closestDist then
+                            closestDist = dist
+                            closestPart = part
+                        end
+                    end
                 end
             end
         end
     end
-    if best then promptCache[animalData.uid] = best end
-    return best
+
+    return closestPart
 end
 
-local function firePrompt(prompt)
-    if not prompt or not prompt.Enabled then return false end
-    local now = os.clock()
-    if lastFireTime[prompt] and now - lastFireTime[prompt] < STEAL_DELAY then return false end
-    lastFireTime[prompt] = now
+local function getNearestTeleportV2MedPoint(fromPos)
+    local bestPoint = nil
+    local bestDist = math.huge
 
-    for i = 1, STEAL_BURST do
-        pcall(function()
-            if fireproximityprompt then
-                fireproximityprompt(prompt)
-            else
-                prompt:InputBegan(Enum.UserInputType.MouseButton1)
-                task.wait(0.02)
-                prompt:InputEnded(Enum.UserInputType.MouseButton1)
+    for _, entry in ipairs(TP_V2_MED_POINTS) do
+        local dist = flatDistance(fromPos, entry.pos)
+        if dist < bestDist then
+            bestDist = dist
+            bestPoint = entry
+        end
+    end
+
+    return bestPoint, bestDist
+end
+
+local TP_V2_ALLOWED_BY_MED = {
+    MED1 = {
+        TP6 = true, TP7 = true, TP8 = true, TP10 = true,
+        TP12 = true, TP5 = true, TP3 = true, TP1 = true,
+    },
+    MED2 = {
+        TP1 = true, TP2 = true, TP4 = true, TP6 = true,
+        TP7 = true, TP9 = true, TP11 = true, TP12 = true,
+    },
+}
+
+local function getBestTeleportV2SecondFloorPoint(medPoint, brainrotPos)
+    local medPos = medPoint and medPoint.pos
+    local medName = medPoint and medPoint.name
+    if not medPos or not medName then return nil end
+
+    local allowed = TP_V2_ALLOWED_BY_MED[medName]
+    if not allowed then return nil end
+
+    local bestPoint = nil
+    local bestMedDist = math.huge
+    local bestBrainrotDist = math.huge
+
+    for _, entry in ipairs(TP_V2_SECOND_FLOOR_POINTS) do
+        if allowed[entry.name] then
+            local distToMed = flatDistance(medPos, entry.pos)
+            local distToBrainrot = flatDistance(brainrotPos, entry.pos)
+
+            if (distToBrainrot < bestBrainrotDist)
+                or (math.abs(distToBrainrot - bestBrainrotDist) <= 0.001 and distToMed < bestMedDist) then
+                bestPoint = entry
+                bestMedDist = distToMed
+                bestBrainrotDist = distToBrainrot
+            end
+        end
+    end
+
+    return bestPoint, bestMedDist, bestBrainrotDist
+end
+
+local function runTeleportV2SecondFloor(targetPart, hum, hrp)
+    if not targetPart or not hum or not hrp then return false, "missing target/hum/hrp" end
+
+    local initialPlayerPos = hrp.Position
+    local initialBrainrotPos = targetPart.Position
+
+    local medPoint = getNearestTeleportV2MedPoint(initialPlayerPos)
+    if not medPoint then
+        return false, "no MED point found"
+    end
+
+    local currentBrainrotPos = targetPart.Position
+    local chosenPoint = getBestTeleportV2SecondFloorPoint(medPoint, currentBrainrotPos)
+    if not chosenPoint then
+        return false, "no TP1-TP12 point found"
+    end
+
+    local isFirstFloorBrainrot = currentBrainrotPos.Y <= 6.313370704650879
+    local chosenTargetPos = isFirstFloorBrainrot
+        and Vector3.new(chosenPoint.pos.X, 1, chosenPoint.pos.Z)
+        or chosenPoint.pos
+
+    -- GIRO V2 INICIAL ESTILO BRUH:
+    -- usa la misma direccion que ya usaba este V2 para mirar al llegar a TP1-TP12,
+    -- pero ahora se aplica antes de empezar todo el TP y se bloquea la camara hasta terminar.
+    local signPart = getClosestBaseSignToPosition(chosenTargetPos) or getClosestBaseSign(targetPart)
+    local faceVector = nil
+    if signPart then
+        faceVector = chosenPoint.facing == "front" and signPart.CFrame.LookVector or -signPart.CFrame.LookVector
+        if faceVector.Magnitude <= 0 then
+            faceVector = nil
+        end
+    end
+
+    local camera = Workspace.CurrentCamera
+    local prevCameraType = camera and camera.CameraType
+    local prevFov = camera and camera.FieldOfView
+    local camConn = nil
+
+    if faceVector then
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.CFrame = CFrame.new(hrp.Position, hrp.Position + faceVector)
+        hrp.AssemblyLinearVelocity = Vector3.zero
+    end
+
+    if camera then
+        camera.CameraType = Enum.CameraType.Scriptable
+        camera.FieldOfView = 95
+        camConn = RunService.RenderStepped:Connect(function()
+            local cHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if cHrp and camera then
+                camera.CFrame = cHrp.CFrame * CFrame.new(0, 2, 10) * CFrame.Angles(math.rad(-5), 0, 0)
             end
         end)
     end
-    return true
-end
 
--- ==================== Main Loop ====================
-local function getBestTarget()
-    if #allAnimalsCache == 0 then return nil end
-    -- Return highest gen (first in sorted cache)
-    return allAnimalsCache[1]
-end
-
-task.spawn(function()
-    while true do
-        local target = getBestTarget()
-        if target then
-            local hrp = getHRP()
-            local targetPart = findAdorneeGlobal(target)
-            local distance = hrp and targetPart and (hrp.Position - targetPart.Position).Magnitude or math.huge
-
-            -- Teleport if too far
-            if distance > TP_RANGE then
-                teleportToBrainrot(target)
-                task.wait(0.5)
-                hrp = getHRP()
-                targetPart = findAdorneeGlobal(target)
-                distance = hrp and targetPart and (hrp.Position - targetPart.Position).Magnitude or math.huge
-            end
-
-            -- Steal if in range
-            if distance <= STEAL_RADIUS then
-                local prompt = findPromptForAnimal(target)
-                if prompt then
-                    firePrompt(prompt)
-                end
-            end
+    local function stopCameraLock()
+        if camConn then
+            camConn:Disconnect()
+            camConn = nil
         end
-        task.wait(0.2)
+        if camera then
+            if prevCameraType then camera.CameraType = prevCameraType end
+            if prevFov then camera.FieldOfView = prevFov end
+        end
     end
-end)
 
-print("TP + Auto Grab loaded. Teleporting and stealing highest brainrot.")
+    local function finish(ok, msg)
+        stopCameraLock()
+        return ok, msg
+    end
+
+    hrp.AssemblyLinearVelocity = Vector3.zero
+
+    -- Flujo V2 corregido:
+    -- 1) arranca salto
+    -- 2) TP a MED1/MED2 usando SOLO X/Z del MED y la Y actual del personaje
+    -- 3) sigue con riseToY
+    -- 4) luego TP al punto TP1-TP12 permitido
+    -- 5) si el brainrot está en primer piso, usa esas mismas coordenadas TP1-TP12 pero con altura fija -3.28
+    local riseTargetY = 45
+
+    if hum and hum.Parent then
+        hum:ChangeState(Enum.HumanoidStateType.Jumping)
+    end
+    task.wait(0.01)
+
+    if not hrp or not hrp.Parent then
+        return finish(false, "hrp lost during jump start")
+    end
+
+    local medFlatPos = Vector3.new(medPoint.pos.X, hrp.Position.Y, medPoint.pos.Z)
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.CFrame = faceVector and CFrame.new(medFlatPos, medFlatPos + faceVector) or CFrame.new(medFlatPos)
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    task.wait(0.1)
+
+    if not hrp or not hrp.Parent then
+        return finish(false, "hrp lost after MED reposition")
+    end
+
+    local reachedMedPoint = waitUntilHeartbeat(function()
+        return hrp and hrp.Parent and flatDistance(hrp.Position, medPoint.pos) <= 2.5
+    end, 1.5)
+
+    if not reachedMedPoint then
+        return finish(false, "failed to reach MED point")
+    end
+
+    riseToY(hrp, riseTargetY)
+
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    -- Ya se giro al inicio; aqui solo conserva esa misma orientacion durante el TP a TP1-TP12.
+ ... (526 KB left)
